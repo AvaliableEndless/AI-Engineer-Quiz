@@ -11,17 +11,80 @@ drill-down sidebar.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 from . import ai
 from .db import get_conn
 
 SORTS = {
-    "newest": "a.created_at DESC",
-    "oldest": "a.created_at ASC",
-    "name": "a.title ASC",
-    "largest": "a.size DESC",
+    "newest": "a.created_at DESC, a.id DESC",
+    "oldest": "a.created_at ASC, a.id ASC",
+    "name": "a.title ASC, a.id ASC",
+    "largest": "a.size DESC, a.id DESC",
 }
+
+
+@dataclass(frozen=True)
+class AssetFilters:
+    q: str = ""
+    media_type: Optional[str] = None
+    tag: Optional[str] = None
+    collection_id: Optional[int] = None
+    status: str = "active"
+    sort: str = "newest"
+    include_tags: tuple[str, ...] = ()
+    exclude_tags: tuple[str, ...] = ()
+
+
+def _conditions(filters: AssetFilters) -> tuple[str, list]:
+    include = {name.strip().lower() for name in filters.include_tags if name.strip()}
+    exclude = {name.strip().lower() for name in filters.exclude_tags if name.strip()}
+    if filters.tag and filters.tag.strip():
+        include.add(filters.tag.strip().lower())
+    if include & exclude:
+        return "0", []
+    where, params = ["a.status = ?"], [filters.status]
+    if filters.q.strip():
+        query = _fts_query(filters.q)
+        if not query:
+            return "0", []
+        where.append("a.id IN (SELECT rowid FROM asset_fts WHERE asset_fts MATCH ?)")
+        params.append(query)
+    if filters.media_type:
+        where.append("a.media_type = ?")
+        params.append(filters.media_type)
+    if filters.collection_id is not None:
+        where.append(
+            "EXISTS (SELECT 1 FROM collection_assets ca "
+            "WHERE ca.asset_id = a.id AND ca.collection_id = ?)"
+        )
+        params.append(filters.collection_id)
+    for name in sorted(include):
+        where.append(
+            "EXISTS (SELECT 1 FROM asset_tags at JOIN tags t ON t.id = at.tag_id "
+            "WHERE at.asset_id = a.id AND t.name = ?)"
+        )
+        params.append(name)
+    if exclude:
+        placeholders = ",".join("?" for _ in exclude)
+        where.append(
+            "NOT EXISTS (SELECT 1 FROM asset_tags at JOIN tags t ON t.id = at.tag_id "
+            f"WHERE at.asset_id = a.id AND t.name IN ({placeholders}))"
+        )
+        params.extend(sorted(exclude))
+    return " AND ".join(where), params
+
+
+def _rows(where: str, params: list, sort: str, limit=None, offset=0) -> list[dict]:
+    if sort not in SORTS:
+        raise ValueError("Unknown sort")
+    sql = f"SELECT a.* FROM assets a WHERE {where} ORDER BY {SORTS[sort]}"
+    args = list(params)
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        args.extend((limit, offset))
+    return [dict(row) for row in get_conn().execute(sql, args)]
 
 
 def _fts_query(q: str) -> str:
@@ -35,6 +98,8 @@ def search(
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
+    include_tags: tuple[str, ...] = (),
+    exclude_tags: tuple[str, ...] = (),
     collection_id: Optional[int] = None,
     status: str = "active",
     sort: str = "newest",
@@ -48,37 +113,16 @@ def search(
     if mode == "semantic" and q.strip():
         return _semantic_search(q, media_type, status, limit, offset)
 
-    where = ["a.status = ?"]
-    params: list = [status]
-    join = ""
-
-    if q.strip():
-        join += " JOIN asset_fts f ON f.rowid = a.id"
-        where.append("asset_fts MATCH ?")
-        params.append(_fts_query(q))
-    if media_type:
-        where.append("a.media_type = ?")
-        params.append(media_type)
-    if tag:
-        join += (" JOIN asset_tags at ON at.asset_id = a.id"
-                 " JOIN tags t ON t.id = at.tag_id AND t.name = ?")
-        params.append(tag.lower())
-    if collection_id:
-        join += " JOIN collection_assets ca ON ca.asset_id = a.id AND ca.collection_id = ?"
-        params.append(collection_id)
-
-    where_sql = " AND ".join(where)
-    order = "bm25(asset_fts)" if q.strip() else SORTS.get(sort, SORTS["newest"])
-
+    if limit < 1 or offset < 0:
+        raise ValueError("Invalid pagination")
+    filters = AssetFilters(q=q, media_type=media_type, tag=tag,
+                           collection_id=collection_id, status=status, sort=sort,
+                           include_tags=include_tags, exclude_tags=exclude_tags)
+    where_sql, params = _conditions(filters)
     total = conn.execute(
-        f"SELECT COUNT(*) AS c FROM assets a{join} WHERE {where_sql}", params
+        f"SELECT COUNT(*) AS c FROM assets a WHERE {where_sql}", params
     ).fetchone()["c"]
-
-    rows = conn.execute(
-        f"""SELECT a.* FROM assets a{join} WHERE {where_sql}
-            ORDER BY {order} LIMIT ? OFFSET ?""",
-        [*params, limit, offset],
-    ).fetchall()
+    rows = _rows(where_sql, params, sort, limit, offset)
 
     return {
         "total": total,

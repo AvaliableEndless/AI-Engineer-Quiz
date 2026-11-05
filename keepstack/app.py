@@ -9,8 +9,9 @@ from __future__ import annotations
 import io
 import ipaddress
 import json
+from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import (Body, Depends, FastAPI, File, Form, HTTPException, Query,
                      Request, UploadFile)
@@ -173,21 +174,32 @@ async def upload_assets(
     return {"created": results}
 
 
-@app.get("/api/assets")
-def list_assets(
+def asset_filters(
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
-    collection_id: Optional[int] = None,
-    status: str = "active",
-    sort: str = "newest",
-    mode: str = "keyword",
-    limit: int = Query(60, le=200),
-    offset: int = 0,
+    collection_id: Optional[int] = Query(None, ge=1),
+    include_tags: Optional[list[str]] = Query(None),
+    exclude_tags: Optional[list[str]] = Query(None),
+    status: Literal["active"] = "active",
+    sort: Literal["newest", "oldest", "name", "largest"] = "newest",
+    mode: Literal["keyword"] = "keyword",
+):
+    return search.AssetFilters(
+        q=q, media_type=media_type, tag=tag, collection_id=collection_id,
+        status=status, sort=sort, include_tags=tuple(include_tags or ()),
+        exclude_tags=tuple(exclude_tags or ()),
+    )
+
+
+@app.get("/api/assets")
+def list_assets(
+    filters: search.AssetFilters = Depends(asset_filters),
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     user: dict = Depends(require_user),
 ):
-    return search.search(q=q, media_type=media_type, tag=tag, collection_id=collection_id,
-                         status=status, sort=sort, mode=mode, limit=limit, offset=offset)
+    return search.search(**asdict(filters), limit=limit, offset=offset)
 
 
 def _get_asset_or_404(uuid: str) -> dict:

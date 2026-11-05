@@ -6,13 +6,9 @@ repository. Run with:  python -m pytest -q
 import io
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
-
-os.environ["KEEPSTACK_DATA_DIR"] = tempfile.mkdtemp(prefix="keepstack-test-")
-os.environ["KEEPSTACK_AI_ENABLED"] = "false"
 
 from PIL import Image  # noqa: E402
 
