@@ -2,7 +2,8 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const state = { token: localStorage.getItem("keepstack_token"), user: null,
-  q: "", mode: "keyword", media: null, tag: null, sort: "newest", collection: null };
+  q: "", media: null, includeTags: [], excludeTags: [], sort: "newest",
+  collection: null, limit: 20, offset: 0, total: 0 };
 
 // ---------- API helper ----------
 async function api(path, opts = {}) {
@@ -10,8 +11,11 @@ async function api(path, opts = {}) {
   if (state.token) headers["Authorization"] = "Bearer " + state.token;
   if (opts.json) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); }
   const res = await fetch(path, { method: opts.json ? "POST" : "GET", ...opts, headers });
-  if (res.status === 401) { logout(); throw new Error("unauthorised"); }
-  if (!res.ok) { const t = await res.text(); throw new Error(t || res.statusText); }
+  if (!res.ok) {
+    if (res.status === 401) logout();
+    const error = new Error(res.status === 401 ? "Please sign in again." : "Request failed (" + res.status + ").");
+    error.status = res.status; throw error;
+  }
   return res.headers.get("content-type")?.includes("json") ? res.json() : res;
 }
 
@@ -29,10 +33,14 @@ $("#login-form").addEventListener("submit", async (e) => {
     const r = await api("/api/auth/login", { json: { username: $("#login-user").value, password: $("#login-pass").value } });
     state.token = r.token; localStorage.setItem("keepstack_token", r.token);
     state.user = r.user; enterApp();
-  } catch { $("#login-error").textContent = "Invalid credentials"; $("#login-error").classList.remove("hidden"); }
+  } catch (error) {
+    $("#login-error").textContent = error.status === 401 ? "Invalid credentials" : "Unable to sign in. " + error.message;
+    $("#login-error").classList.remove("hidden");
+  }
 });
 $("#btn-logout").addEventListener("click", logout);
 function logout() { localStorage.removeItem("keepstack_token"); state.token = null; state.user = null;
+  libraryVersion++; clearTimeout(searchTimer); libraryController?.abort(); appliedQuery = null;
   $("#app").classList.add("hidden"); $("#login").classList.remove("hidden"); }
 
 function enterApp() {
@@ -57,46 +65,213 @@ $$(".nav-item").forEach(btn => btn.addEventListener("click", () => {
 }));
 
 // ---------- library / search ----------
-let searchTimer;
-$("#search").addEventListener("input", (e) => { state.q = e.target.value; clearTimeout(searchTimer); searchTimer = setTimeout(loadLibrary, 250); });
-$("#search-mode").addEventListener("change", (e) => { state.mode = e.target.value; loadLibrary(); });
-$("#sort").addEventListener("change", (e) => { state.sort = e.target.value; loadLibrary(); });
-$("#active-filter").addEventListener("click", () => { state.media = null; state.tag = null; state.collection = null; loadLibrary(); });
+let searchTimer, libraryController;
+let libraryVersion = 0, appliedQuery = null, libraryBusy = false, exporting = false;
+let filterOptions = { collections: [], tags: [] };
 
-async function loadLibrary() {
-  const p = new URLSearchParams({ q: state.q, sort: state.sort, mode: state.mode, limit: "120" });
-  if (state.media) p.set("media_type", state.media);
-  if (state.tag) p.set("tag", state.tag);
-  if (state.collection) p.set("collection_id", state.collection);
-  const data = await api("/api/assets?" + p.toString());
-  renderFacets(data.facets);
-  renderGrid(data.items, data.total);
-  const filt = state.media || (state.tag ? "#" + state.tag : null) || (state.collection ? "collection" : null);
-  $("#active-filter").classList.toggle("hidden", !filt);
-  if (filt) $("#active-filter").textContent = filt;
+function querySnapshot() {
+  return { q: state.q, media: state.media, collection: state.collection, sort: state.sort,
+    includeTags: [...state.includeTags], excludeTags: [...state.excludeTags],
+    limit: state.limit, offset: state.offset };
+}
+
+function queryParams(query, paged = true) {
+  const params = new URLSearchParams({ q: query.q, sort: query.sort });
+  if (query.media) params.set("media_type", query.media);
+  if (query.collection) params.set("collection_id", query.collection);
+  query.includeTags.forEach(tag => params.append("include_tags", tag));
+  query.excludeTags.forEach(tag => params.append("exclude_tags", tag));
+  if (paged) { params.set("limit", query.limit); params.set("offset", query.offset); }
+  return params;
+}
+
+function changeFilters(changes, delay = 0) {
+  Object.assign(state, changes, { offset: 0 });
+  return loadLibrary(delay);
+}
+
+$("#search").addEventListener("input", e => changeFilters({ q: e.target.value }, 250));
+$("#sort").addEventListener("change", e => changeFilters({ sort: e.target.value }));
+$("#collection-filter").addEventListener("change", e => changeFilters({ collection: e.target.value || null }));
+$("#media-filter").addEventListener("change", e => changeFilters({ media: e.target.value || null }));
+for (const [id, key] of [["include-tags", "includeTags"], ["exclude-tags", "excludeTags"]]) {
+  $("#" + id).addEventListener("change", e => {
+    if (e.target.type !== "checkbox") return;
+    const tags = new Set(state[key]);
+    if (e.target.checked) tags.add(e.target.value); else tags.delete(e.target.value);
+    changeFilters({ [key]: [...tags] });
+  });
+}
+$("#clear-filters").addEventListener("click", () => {
+  $("#search").value = "";
+  changeFilters({ q: "", collection: null, media: null, includeTags: [], excludeTags: [] });
+});
+$("#prev-page").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.limit); loadLibrary(); });
+$("#next-page").addEventListener("click", () => { state.offset += state.limit; loadLibrary(); });
+$("#retry-library").addEventListener("click", () => loadLibrary());
+$("#export-csv").addEventListener("click", exportCSV);
+
+function updateLibraryButtons() {
+  $("#prev-page").disabled = libraryBusy || !appliedQuery || state.offset === 0;
+  $("#next-page").disabled = libraryBusy || !appliedQuery || state.offset + state.limit >= state.total;
+  $("#export-csv").disabled = libraryBusy || !appliedQuery || exporting;
+  $("#export-csv").querySelector(".export-label").textContent = exporting ? "Exporting..." : "Export CSV";
+}
+
+function renderActiveFilters(query) {
+  const entries = [];
+  if (query.q.trim()) entries.push(["q", query.q, "Keyword: " + query.q]);
+  if (query.collection) {
+    const collection = filterOptions.collections.find(item => String(item.id) === String(query.collection));
+    entries.push(["collection", query.collection, "Collection: " + (collection?.name || query.collection)]);
+  }
+  if (query.media) entries.push(["media", query.media, "Type: " + query.media]);
+  query.includeTags.forEach(tag => entries.push(["includeTags", tag, "Include: " + tag]));
+  query.excludeTags.forEach(tag => entries.push(["excludeTags", tag, "Exclude: " + tag]));
+  const container = $("#active-filters");
+  container.replaceChildren();
+  entries.forEach(([key, value, label]) => {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "chip"; button.textContent = label;
+    button.title = "Remove " + label; button.setAttribute("aria-label", "Remove " + label);
+    button.addEventListener("click", () => {
+      const change = key === "includeTags" || key === "excludeTags"
+        ? { [key]: state[key].filter(tag => tag !== value) } : { [key]: key === "q" ? "" : null };
+      if (key === "q") $("#search").value = "";
+      changeFilters(change);
+    });
+    container.append(button);
+  });
+  $("#clear-filters").disabled = entries.length === 0;
+  $("#include-count").textContent = query.includeTags.length || "";
+  $("#exclude-count").textContent = query.excludeTags.length || "";
+  $("#collection-filter").value = query.collection || "";
+  $("#media-filter").value = query.media || "";
+}
+
+function renderFilterOptions(query, facets) {
+  $("#collection-filter").innerHTML = '<option value="">All collections</option>' +
+    filterOptions.collections.map(c => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join("");
+  const media = [...new Set([...(facets.media_types || []).map(m => m.value), ...(query.media ? [query.media] : [])])];
+  $("#media-filter").innerHTML = '<option value="">All types</option>' +
+    media.map(type => '<option value="' + esc(type) + '">' + esc(type) + '</option>').join("");
+  const tags = [...new Set([...filterOptions.tags.map(tag => tag.name), ...query.includeTags, ...query.excludeTags])].sort();
+  for (const [id, key, action] of [["include-tags", "includeTags", "Include"], ["exclude-tags", "excludeTags", "Exclude"]]) {
+    $("#" + id).innerHTML = tags.map(tag => '<label><input type="checkbox" value="' + esc(tag) +
+      '" aria-label="' + action + ' tag ' + esc(tag) + '"' + (query[key].includes(tag) ? " checked" : "") +
+      '><span>' + esc(tag) + '</span></label>').join("") || '<span class="muted">No tags</span>';
+  }
+  renderActiveFilters(query);
+}
+
+function loadLibrary(delay = 0) {
+  clearTimeout(searchTimer);
+  const version = ++libraryVersion;
+  libraryController?.abort();
+  const controller = new AbortController();
+  libraryController = controller;
+  const query = querySnapshot();
+  appliedQuery = null; libraryBusy = true;
+  $("#library-error").classList.add("hidden");
+  $("#empty").classList.add("hidden");
+  $("#grid").classList.add("hidden");
+  $("#library-status").classList.remove("hidden");
+  $("#result-title").textContent = "Searching...";
+  $("#page-info").textContent = "Loading...";
+  $("#grid").setAttribute("aria-busy", "true");
+  renderActiveFilters(query);
+  updateLibraryButtons();
+  if (delay) { searchTimer = setTimeout(() => fetchLibrary(query, version, controller.signal), delay); return; }
+  return fetchLibrary(query, version, controller.signal);
+}
+
+async function fetchLibrary(query, version, signal) {
+  try {
+    const [data, collections, tags] = await Promise.all([
+      api("/api/assets?" + queryParams(query), { signal }),
+      api("/api/collections", { signal }), api("/api/tags", { signal }),
+    ]);
+    if (version !== libraryVersion) return;
+    if (query.offset > 0 && data.items.length === 0 && data.total > 0) {
+      state.offset = Math.floor((data.total - 1) / state.limit) * state.limit;
+      return loadLibrary();
+    }
+    if (data.total === 0) { query.offset = 0; state.offset = 0; }
+    state.total = data.total;
+    filterOptions = { collections: collections.collections, tags: tags.tags };
+    appliedQuery = query;
+    renderFilterOptions(query, data.facets);
+    renderFacets(data.facets);
+    renderGrid(data.items, data.total);
+    $("#grid").classList.remove("hidden");
+    $("#page-info").textContent = data.total
+      ? (query.offset + 1) + "-" + (query.offset + data.items.length) + " of " + data.total
+      : "0 results";
+  } catch (error) {
+    if (version !== libraryVersion || error.name === "AbortError") return;
+    $("#result-title").textContent = "Assets unavailable";
+    $("#library-error-message").textContent = "Could not load assets. " + error.message;
+    $("#library-error").classList.remove("hidden");
+    $("#page-info").textContent = "Unavailable";
+  } finally {
+    if (version === libraryVersion) {
+      libraryBusy = false;
+      $("#library-status").classList.add("hidden");
+      $("#grid").setAttribute("aria-busy", "false");
+      updateLibraryButtons();
+    }
+  }
+}
+
+async function exportCSV() {
+  if (!appliedQuery || libraryBusy || exporting) return;
+  const query = appliedQuery;
+  exporting = true; updateLibraryButtons();
+  try {
+    const response = await api("/api/assets/export.csv?" + queryParams(query, false));
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url; link.download = "keepstack-assets.csv";
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("CSV downloaded");
+  } catch (error) {
+    toast("CSV download failed. " + error.message, "err");
+  } finally { exporting = false; updateLibraryButtons(); }
 }
 
 function renderGrid(items, total) {
-  $("#result-title").textContent = state.q ? `Results (${total})` : `Library (${total})`;
+  $("#result-title").textContent = (state.q.trim() ? "Results" : "Library") + " (" + total + ")";
   $("#empty").classList.toggle("hidden", items.length > 0);
-  $("#grid").innerHTML = items.map(a => `
-    <div class="card" data-uuid="${a.uuid}">
-      <img class="thumb" loading="lazy" src="/api/assets/${a.uuid}/thumb" alt="${esc(a.alt_text || a.title)}">
-      <div class="meta">
-        <span class="title" title="${esc(a.title)}">${esc(a.title)}</span>
-        <span class="sub"><span class="badge">${a.media_type}</span><span>${fmtBytes(a.size)}</span></span>
-      </div>
-    </div>`).join("");
-  $$("#grid .card").forEach(c => c.addEventListener("click", () => openAsset(c.dataset.uuid)));
+  $("#grid").innerHTML = items.map(a => '<div class="card" role="button" tabindex="0" data-uuid="' + esc(a.uuid) + '">' +
+    '<img class="thumb" loading="lazy" src="/api/assets/' + esc(a.uuid) + '/thumb" alt="' + esc(a.alt_text || a.title) + '">' +
+    '<div class="meta"><span class="title" title="' + esc(a.title) + '">' + esc(a.title) +
+    '</span><span class="sub"><span class="badge">' + esc(a.media_type) + '</span><span>' + fmtBytes(a.size) +
+    '</span></span><time class="muted card-created" datetime="' + esc(a.created_at) + '">' +
+    esc((a.created_at || "").slice(0, 10)) + '</time></div></div>').join("");
+  $$("#grid .card").forEach(card => {
+    card.addEventListener("click", () => openAsset(card.dataset.uuid));
+    card.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openAsset(card.dataset.uuid); }
+    });
+  });
 }
 
 function renderFacets(facets) {
-  $("#facet-media").innerHTML = (facets.media_types || []).map(m =>
-    `<li class="${state.media===m.value?'active':''}" data-media="${m.value}"><span>${m.value}</span><span class="count">${m.count}</span></li>`).join("");
-  $("#facet-tags").innerHTML = (facets.tags || []).slice(0, 18).map(t =>
-    `<li class="${state.tag===t.value?'active':''}" data-tag="${esc(t.value)}"><span>${esc(t.value)}</span><span class="count">${t.count}</span></li>`).join("");
-  $$("#facet-media li").forEach(li => li.addEventListener("click", () => { state.media = state.media===li.dataset.media?null:li.dataset.media; loadLibrary(); }));
-  $$("#facet-tags li").forEach(li => li.addEventListener("click", () => { state.tag = state.tag===li.dataset.tag?null:li.dataset.tag; loadLibrary(); }));
+  $("#facet-media").innerHTML = (facets.media_types || []).map(m => '<li><button class="' +
+    (state.media === m.value ? "active" : "") + '" data-media="' + esc(m.value) + '"><span>' + esc(m.value) +
+    '</span><span class="count">' + m.count + '</span></button></li>').join("");
+  $("#facet-tags").innerHTML = (facets.tags || []).slice(0, 18).map(t => '<li><button class="' +
+    (state.includeTags.includes(t.value) ? "active" : "") + '" data-tag="' + esc(t.value) + '"><span>' + esc(t.value) +
+    '</span><span class="count">' + t.count + '</span></button></li>').join("");
+  $$("#facet-media button").forEach(button => button.addEventListener("click", () =>
+    changeFilters({ media: state.media === button.dataset.media ? null : button.dataset.media })));
+  $$("#facet-tags button").forEach(button => button.addEventListener("click", () => {
+    const tag = button.dataset.tag;
+    changeFilters({ includeTags: state.includeTags.includes(tag)
+      ? state.includeTags.filter(value => value !== tag) : [...state.includeTags, tag] });
+  }));
 }
 
 // ---------- asset detail drawer ----------
@@ -173,12 +348,12 @@ async function openAsset(uuid) {
     $("#tag-add")?.addEventListener("keydown", async (e) => {
       if (e.key === "Enter" && e.target.value.trim()) {
         await api("/api/assets/"+uuid+"/tags", { json: { name: e.target.value.trim() } });
-        openAsset(uuid);
+        openAsset(uuid); loadLibrary();
       }
     });
     $$("#tag-row .rm").forEach(rm => rm.addEventListener("click", async () => {
       await api("/api/assets/"+uuid+"/tags/"+encodeURIComponent(rm.dataset.tag), { method: "DELETE" });
-      openAsset(uuid);
+      openAsset(uuid); loadLibrary();
     }));
     $("#d-share")?.addEventListener("click", async () => {
       const r = await api("/api/shares", { json: { target_type: "asset", target_id: a.id, permission: "download" } });
@@ -228,7 +403,7 @@ async function loadCollections() {
     `<div class="collection-card" data-id="${c.id}"><span class="n">${esc(c.name)}</span><span class="muted">${c.asset_count} assets</span><span class="muted">${esc(c.description||"")}</span></div>`).join("")
     || '<p class="muted">No collections yet.</p>';
   $$("#collection-list .collection-card").forEach(card => card.addEventListener("click", () => {
-    state.collection = card.dataset.id; state.media = null; state.tag = null;
+    state.collection = card.dataset.id; state.offset = 0;
     $$(".nav-item").forEach(b => b.classList.remove("active"));
     $('.nav-item[data-view="library"]').classList.add("active");
     $$(".view").forEach(v => v.classList.add("hidden")); $("#view-library").classList.remove("hidden");

@@ -30,11 +30,7 @@
         <strong>Keepstack</strong>
       </div>
       <div class="search-box">
-        <input id="search" placeholder="Search assets, tags, metadata...">
-        <select id="search-mode" title="Search mode">
-          <option value="keyword">Keyword</option>
-          <option value="semantic">Semantic</option>
-        </select>
+        <input id="search" aria-label="Search assets" placeholder="Search assets, tags, metadata...">
       </div>
       <div class="topbar-right">
         <button id="btn-upload" class="btn btn-primary">Upload</button>
@@ -56,6 +52,7 @@
         </nav>
 
         <div id="facets" class="facets">
+          <small class="muted">All active assets</small>
           <div class="facet-group">
             <h4>Media type</h4>
             <ul id="facet-media"></ul>
@@ -72,17 +69,44 @@
           <div class="view-head">
             <h2 id="result-title">Library</h2>
             <div class="view-controls">
-              <span id="active-filter" class="chip hidden"></span>
-              <select id="sort">
+              <select id="sort" aria-label="Sort assets">
                 <option value="newest">Newest</option>
                 <option value="oldest">Oldest</option>
                 <option value="name">Name</option>
                 <option value="largest">Largest</option>
               </select>
+              <button id="export-csv" class="btn btn-primary" disabled><span aria-hidden="true">&#8595;</span> <span class="export-label">Export CSV</span></button>
             </div>
           </div>
-          <div id="grid" class="grid"></div>
-          <div id="empty" class="empty hidden">No assets yet. Click Upload to get started.</div>
+          <div class="filter-bar" aria-label="Asset filters">
+            <label class="filter-field">Collection<select id="collection-filter"><option value="">All collections</option></select></label>
+            <label class="filter-field">Media type<select id="media-filter"><option value="">All types</option></select></label>
+            <details class="tag-filter">
+              <summary>Include all tags <span id="include-count" class="selection-count"></span></summary>
+              <div id="include-tags" class="tag-options"></div>
+            </details>
+            <details class="tag-filter">
+              <summary>Exclude any tags <span id="exclude-count" class="selection-count"></span></summary>
+              <div id="exclude-tags" class="tag-options"></div>
+            </details>
+          </div>
+          <div class="filter-summary">
+            <div id="active-filters" class="active-filters" aria-label="Active filters"></div>
+            <button id="clear-filters" class="btn icon-button" title="Clear all filters" aria-label="Clear all filters" disabled>&times;</button>
+          </div>
+          <div id="library-status" class="library-status hidden" role="status">Loading assets...</div>
+          <div id="library-error" class="library-error hidden" role="alert">
+            <p id="library-error-message"></p><button id="retry-library" class="btn">Retry</button>
+          </div>
+          <div id="grid" class="grid" aria-busy="false"></div>
+          <div id="empty" class="empty hidden" role="status">No matching assets.</div>
+          <nav class="pagination" aria-label="Result pages">
+            <span id="page-info" role="status">Loading...</span>
+            <div class="page-buttons">
+              <button id="prev-page" class="btn icon-button" title="Previous page" aria-label="Previous page" disabled>&#8592;</button>
+              <button id="next-page" class="btn icon-button" title="Next page" aria-label="Next page" disabled>&#8594;</button>
+            </div>
+          </nav>
         </div>
 
         <div id="view-collections" class="view hidden">
