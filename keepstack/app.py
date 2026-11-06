@@ -179,7 +179,7 @@ def asset_filters(
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
-    collection_id: Optional[int] = Query(None, ge=1),
+    collection_id: Optional[int] = Query(None, ge=1, le=2**63 - 1),
     include_tags: Optional[list[str]] = Query(None),
     exclude_tags: Optional[list[str]] = Query(None),
     status: Literal["active"] = "active",
@@ -197,7 +197,7 @@ def asset_filters(
 def list_assets(
     filters: search.AssetFilters = Depends(asset_filters),
     limit: int = Query(20, ge=1, le=200),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
     user: dict = Depends(require_user),
 ):
     return search.search(**asdict(filters), limit=limit, offset=offset)

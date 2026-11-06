@@ -20,7 +20,8 @@ def query(sort="newest"):
 
 @pytest.mark.parametrize("params", [
     {"limit": 0}, {"limit": -1}, {"limit": 201}, {"limit": "oops"},
-    {"offset": -1}, {"offset": "oops"}, {"collection_id": 0},
+    {"offset": -1}, {"offset": "oops"}, {"offset": 2**63},
+    {"collection_id": 0}, {"collection_id": 2**63},
     {"sort": "unknown"}, {"status": "deleted"}, {"mode": "semantic"},
 ])
 def test_invalid_query_parameters(client, params):
@@ -41,6 +42,15 @@ def test_repeated_tag_parameters_and_total(client, catalog):
 
 def test_list_requires_login(client):
     assert client.get("/api/assets", headers={"Authorization": ""}).status_code == 401
+
+
+def test_out_of_range_page_and_largest_valid_integer(client, catalog):
+    catalog["add"]()
+    response = client.get("/api/assets", params={"offset": 2**63 - 1})
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"] == []
+    assert client.get("/api/assets", params={"collection_id": 2**63 - 1}).json()["total"] == 0
 
 
 @pytest.mark.parametrize("sort", ["newest", "oldest", "name", "largest"])
@@ -91,7 +101,8 @@ def test_empty_export_auth_and_validation(client):
         "uuid", "title", "description", "filename", "media_type", "tags", "created_at",
     ]
     assert client.get("/api/assets/export.csv", headers={"Authorization": ""}).status_code == 401
-    for params in [{"sort": "unknown"}, {"status": "deleted"}, {"mode": "semantic"}]:
+    for params in [{"sort": "unknown"}, {"status": "deleted"}, {"mode": "semantic"},
+                   {"collection_id": 2**63}]:
         assert client.get("/api/assets/export.csv", params=params).status_code == 422
 
 
