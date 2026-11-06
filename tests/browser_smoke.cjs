@@ -84,6 +84,7 @@ async function main() {
   assert.equal((await download("empty")).length, 0);
   await tag("exclude", "approved", false);
   await ready("1-20 of 45");
+  await page.locator("#next-page").click(); await ready("21-40 of 45");
   const specialTag = '客户, "宣传" & 50%_';
   await tag("include", specialTag); await ready("1-1 of 1");
   assert(JSON.parse((await download("special-tag"))[0].tags).includes(specialTag));
