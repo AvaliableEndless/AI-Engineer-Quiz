@@ -8,6 +8,12 @@ semantic versioning.
 
 ### Added
 
+- Combined keyword, collection, media type, all-included tags and any-excluded
+  tags, with stable pagination and authenticated full-result CSV export.
+- Search filter controls, removable conditions, pagination, download errors and
+  request cancellation/version guards in the existing vanilla JavaScript UI.
+- Reproducible search/export demo data and API/browser workflow regressions.
+
 - Parse common XMP RDF fields into structured metadata, catalog fields, and
   full-text search.
 - OCR images at ingest through the Tesseract binary when it is installed, so
@@ -30,6 +36,11 @@ semantic versioning.
   Tunable with `KEEPSTACK_LOGIN_MAX_ATTEMPTS` and `KEEPSTACK_LOGIN_LOCKOUT_SECONDS`.
 
 ### Changed
+
+- Keyword searches honor the selected ordering with a unique ID tie-breaker.
+  Invalid pagination and collection integers are rejected before querying SQLite.
+- JSON API requests default to POST while preserving explicit request methods.
+  The search page exposes keyword search only; optional model code is retained.
 
 - Switched the web interface to a light theme: white and soft-gray surfaces
   with an indigo accent, applied across the app, placeholders, and share pages.
