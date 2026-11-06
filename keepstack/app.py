@@ -6,6 +6,7 @@ single-page web client is served from the ``web/`` directory at the root.
 """
 from __future__ import annotations
 
+import csv
 import io
 import ipaddress
 import json
@@ -200,6 +201,26 @@ def list_assets(
     user: dict = Depends(require_user),
 ):
     return search.search(**asdict(filters), limit=limit, offset=offset)
+
+
+@app.get("/api/assets/export.csv")
+def export_assets(
+    filters: search.AssetFilters = Depends(asset_filters),
+    user: dict = Depends(require_user),
+):
+    columns = ["uuid", "title", "description", "filename", "media_type", "tags", "created_at"]
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=columns)
+    writer.writeheader()
+    for asset in search.export_assets(filters):
+        row = {key: asset[key] for key in columns}
+        row["tags"] = json.dumps(asset["tags"], ensure_ascii=False)
+        writer.writerow(row)
+    return Response(
+        content=output.getvalue().encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="keepstack-assets.csv"'},
+    )
 
 
 def _get_asset_or_404(uuid: str) -> dict:

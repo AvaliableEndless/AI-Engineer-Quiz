@@ -132,6 +132,23 @@ def search(
     }
 
 
+def export_assets(filters: AssetFilters) -> list[dict]:
+    """Use the same conditions and ordering as the list, without pagination."""
+    where, params = _conditions(filters)
+    rows = _rows(where, params, filters.sort)
+    tags: dict[int, list[str]] = {}
+    for row in get_conn().execute(
+        f"""SELECT at.asset_id, t.name FROM asset_tags at
+            JOIN tags t ON t.id = at.tag_id
+            JOIN assets a ON a.id = at.asset_id
+            WHERE {where} ORDER BY t.name""", params,
+    ):
+        tags.setdefault(row["asset_id"], []).append(row["name"])
+    for row in rows:
+        row["tags"] = tags.get(row["id"], [])
+    return rows
+
+
 def _semantic_search(q, media_type, status, limit, offset) -> dict:
     conn = get_conn()
     qvec = ai.embed(q)
